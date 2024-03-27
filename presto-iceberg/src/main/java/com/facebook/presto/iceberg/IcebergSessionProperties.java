@@ -55,6 +55,7 @@ public final class IcebergSessionProperties
     public static final String PARQUET_DEREFERENCE_PUSHDOWN_ENABLED = "parquet_dereference_pushdown_enabled";
     public static final String MERGE_ON_READ_MODE_ENABLED = "merge_on_read_enabled";
     public static final String PUSHDOWN_FILTER_ENABLED = "pushdown_filter_enabled";
+    public static final String FURTHER_FLAG = "further_flag";
     public static final String DELETE_AS_JOIN_REWRITE_ENABLED = "delete_as_join_rewrite_enabled";
     public static final String HIVE_METASTORE_STATISTICS_MERGE_STRATEGY = "hive_statistics_merge_strategy";
     public static final String STATISTIC_SNAPSHOT_RECORD_DIFFERENCE_WEIGHT = "statistic_snapshot_record_difference_weight";
@@ -169,6 +170,11 @@ public final class IcebergSessionProperties
                         "Experimental: Enable Filter Pushdown for Iceberg. This is only supported with Native Worker.",
                         icebergConfig.isPushdownFilterEnabled(),
                         false),
+                booleanProperty(
+                        FURTHER_FLAG,
+                        "Experimental: further flag",
+                        icebergConfig.isFurtherFlag(),
+                        false),
                 doubleProperty(
                         STATISTIC_SNAPSHOT_RECORD_DIFFERENCE_WEIGHT,
                         "the amount that the difference in total record count matters" +
@@ -280,6 +286,11 @@ public final class IcebergSessionProperties
     public static boolean isPushdownFilterEnabled(ConnectorSession session)
     {
         return session.getProperty(PUSHDOWN_FILTER_ENABLED, Boolean.class);
+    }
+
+    public static boolean isFurtherFlag(ConnectorSession session)
+    {
+        return session.getProperty(FURTHER_FLAG, Boolean.class);
     }
 
     public static double getStatisticSnapshotRecordDifferenceWeight(ConnectorSession session)

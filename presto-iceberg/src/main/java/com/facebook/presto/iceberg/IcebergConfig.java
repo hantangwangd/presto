@@ -49,6 +49,7 @@ public class IcebergConfig
     private boolean mergeOnReadModeEnabled = true;
     private double statisticSnapshotRecordDifferenceWeight;
     private boolean pushdownFilterEnabled;
+    private boolean furtherFlag = true;
     private boolean deleteAsJoinRewriteEnabled = true;
 
     private HiveStatisticsMergeStrategy hiveStatisticsMergeStrategy = HiveStatisticsMergeStrategy.NONE;
@@ -220,6 +221,18 @@ public class IcebergConfig
     public double getStatisticSnapshotRecordDifferenceWeight()
     {
         return statisticSnapshotRecordDifferenceWeight;
+    }
+
+    @Config("iceberg.further_flag")
+    public IcebergConfig setFurtherFlag(boolean furtherFlag)
+    {
+        this.furtherFlag = furtherFlag;
+        return this;
+    }
+
+    public boolean isFurtherFlag()
+    {
+        return furtherFlag;
     }
 
     @Config("iceberg.pushdown-filter-enabled")

@@ -69,6 +69,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.facebook.presto.expressions.LogicalRowExpressions.TRUE_CONSTANT;
+import static com.facebook.presto.iceberg.IcebergSessionProperties.isFurtherFlag;
 import static com.facebook.presto.spi.plan.ProjectNode.Locality.LOCAL;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -250,6 +251,9 @@ public class IcebergMetadataOptimizer
 
         private boolean isReducible(AggregationNode node, List<VariableReferenceExpression> inputs)
         {
+            if (!isFurtherFlag(connectorSession)) {
+                return false;
+            }
             // The aggregation is reducible when there is no group by key
             if (node.getAggregations().isEmpty() || !node.getGroupingKeys().isEmpty() || !(node.getSource() instanceof TableScanNode)) {
                 return false;
