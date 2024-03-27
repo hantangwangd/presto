@@ -36,6 +36,8 @@ import com.facebook.presto.sql.planner.assertions.PlanMatchPattern;
 import com.facebook.presto.sql.planner.assertions.SymbolAliases;
 import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.relational.FunctionResolution;
+import com.facebook.presto.sql.tree.LongLiteral;
+import com.facebook.presto.sql.tree.StringLiteral;
 import com.facebook.presto.testing.QueryRunner;
 import com.facebook.presto.tests.AbstractTestQueryFramework;
 import com.google.common.base.Functions;
@@ -46,6 +48,7 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.intellij.lang.annotations.Language;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.util.Arrays;
@@ -80,21 +83,30 @@ import static com.facebook.presto.iceberg.IcebergQueryRunner.createIcebergQueryR
 import static com.facebook.presto.iceberg.IcebergSessionProperties.PARQUET_DEREFERENCE_PUSHDOWN_ENABLED;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.PUSHDOWN_FILTER_ENABLED;
 import static com.facebook.presto.parquet.ParquetTypeUtils.pushdownColumnNameForSubfield;
+import static com.facebook.presto.spi.plan.AggregationNode.Step.FINAL;
+import static com.facebook.presto.spi.plan.AggregationNode.Step.PARTIAL;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.AND;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.OR;
 import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static com.facebook.presto.sql.planner.assertions.MatchResult.NO_MATCH;
 import static com.facebook.presto.sql.planner.assertions.MatchResult.match;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.aggregation;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.exchange;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.expression;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.filter;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.functionCall;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.node;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.output;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.project;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.strictProject;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.strictTableScan;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
 import static com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE_STREAMING;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -116,19 +128,495 @@ public class TestIcebergLogicalPlanner
         return createIcebergQueryRunner(ImmutableMap.of("experimental.pushdown-subfields-enabled", "true"), ImmutableMap.of());
     }
 
-    @Test
-    public void testFilterByUnmatchedValueWithFilterPushdown()
+    @DataProvider(name = "push_down_filter_enabled")
+    public Object[][] pushDownFilter()
     {
-        Session sessionWithFilterPushdown = pushdownFilterEnabled();
+        return new Object[][] {
+                {true},
+                {false}};
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizer(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session session = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("create table metadata_optimize(v1 int, v2 varchar, a int, b varchar)" +
+                    " with(partitioning = ARRAY['a', 'b'])");
+            queryRunner.execute("insert into metadata_optimize values" +
+                    " (1, '1001', 1, '1001')," +
+                    " (2, '1002', 2, '1001')," +
+                    " (3, '1003', 3, '1002')," +
+                    " (4, '1004', 4, '1002')");
+
+            assertQuery(session, "select b, max(a), min(a) from metadata_optimize group by b",
+                    "values('1001', 2, 1), ('1002', 4, 3)");
+            assertPlan(session, "select b, max(a), min(a) from metadata_optimize group by b",
+                    output(project(
+                            aggregation(ImmutableMap.of("max", functionCall("max", ImmutableList.of("max_partial")), "min", functionCall("min", ImmutableList.of("min_partial"))),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            aggregation(ImmutableMap.of("max_partial", functionCall("max", ImmutableList.of("a")), "min_partial", functionCall("min", ImmutableList.of("a"))),
+                                                    PARTIAL,
+                                                    project(values(ImmutableList.of("a", "b"),
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002")),
+                                                                    ImmutableList.of(new LongLiteral("4"), new StringLiteral("1002")))))))))));
+
+            assertQuery(session, "select distinct a, b from metadata_optimize",
+                    "values(1, '1001'), (2, '1001'), (3, '1002'), (4, '1002')");
+            assertPlan(session, "select distinct a, b from metadata_optimize",
+                    output(project(
+                            aggregation(ImmutableMap.of(),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            aggregation(ImmutableMap.of(),
+                                                    PARTIAL,
+                                                    project(values(ImmutableList.of("a", "b"),
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002")),
+                                                                    ImmutableList.of(new LongLiteral("4"), new StringLiteral("1002")))))))))));
+
+            assertQuery(session, "select min(a), max(b) from metadata_optimize", "values(1, '1002')");
+            assertPlan(session, "select min(a), max(b) from metadata_optimize",
+                    output(strictProject(
+                            ImmutableMap.of("a", expression("1"), "b", expression("1002")),
+                            exchange(LOCAL, REPARTITION, values()))));
+
+            // Do metadata optimization on a complex query
+            assertQuery(session, "with tt as (select a, b, concat(cast(a as varchar), b) as c from metadata_optimize where a > 1 and a < 4 order by b desc)" +
+                            " select min(a), max(b), approx_distinct(b), c from tt group by c",
+                    "values(2, '1001', 1, '21001'), (3, '1002', 1, '31002')");
+            assertPlan(session, "with tt as (select a, b, concat(cast(a as varchar), b) as c from metadata_optimize where a > 1 and a < 4 order by b desc)" +
+                            " select min(a), max(b), approx_distinct(b), c from tt group by c",
+                    anyTree(values(ImmutableList.of("a", "b"),
+                            ImmutableList.of(
+                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002"))))));
+        }
+        finally {
+            queryRunner.execute("DROP TABLE IF EXISTS metadata_optimize");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizerOnPartitionEvolution(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session session = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("create table metadata_optimize_partition_evolution(v1 int, v2 varchar, a int, b varchar)" +
+                    " with(partitioning = ARRAY['a', 'b'])");
+            queryRunner.execute("insert into metadata_optimize_partition_evolution values" +
+                    " (1, '1001', 1, '1001')," +
+                    " (2, '1002', 2, '1001')," +
+                    " (3, '1003', 3, '1002')," +
+                    " (4, '1004', 4, '1002')");
+
+            queryRunner.execute("alter table metadata_optimize_partition_evolution add column c int with(partitioning = 'identity')");
+            queryRunner.execute("insert into metadata_optimize_partition_evolution values" +
+                    " (5, '1005', 5, '1001', 5)," +
+                    " (6, '1006', 6, '1002', 6)");
+
+            // Do not affect metadata optimization on original partition columns
+            assertQuery(session, "select b, max(a), min(a) from metadata_optimize_partition_evolution group by b",
+                    "values('1001', 5, 1), ('1002', 6, 3)");
+            assertPlan(session, "select b, max(a), min(a) from metadata_optimize_partition_evolution group by b",
+                    output(project(
+                            aggregation(ImmutableMap.of("max", functionCall("max", ImmutableList.of("max_partial")), "min", functionCall("min", ImmutableList.of("min_partial"))),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            aggregation(ImmutableMap.of("max_partial", functionCall("max", ImmutableList.of("a")), "min_partial", functionCall("min", ImmutableList.of("a"))),
+                                                    PARTIAL,
+                                                    project(values(ImmutableList.of("a", "b"),
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002")),
+                                                                    ImmutableList.of(new LongLiteral("4"), new StringLiteral("1002")),
+                                                                    ImmutableList.of(new LongLiteral("5"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("6"), new StringLiteral("1002")))))))))));
+
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(session, "select b, max(c), min(c) from metadata_optimize_partition_evolution group by b",
+                        "values('1001', 5, 5), ('1002', 6, 6)");
+            }
+            // New added partition column is not supported for metadata optimization
+            assertPlan(session, "select b, max(c), min(c) from metadata_optimize_partition_evolution group by b",
+                    output(exchange(REMOTE_STREAMING, GATHER, project(
+                            aggregation(ImmutableMap.of("max", functionCall("max", ImmutableList.of("max_partial")), "min", functionCall("min", ImmutableList.of("min_partial"))),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    aggregation(ImmutableMap.of("max_partial", functionCall("max", ImmutableList.of("c")), "min_partial", functionCall("min", ImmutableList.of("c"))),
+                                                            PARTIAL,
+                                                            anyTree(strictTableScan("metadata_optimize_partition_evolution", identityMap("b", "c")))))))))));
+
+            // Do not affect metadata optimization on original partition columns
+            assertQuery(session, "select distinct a, b from metadata_optimize_partition_evolution",
+                    "values(1, '1001'), (2, '1001'), (3, '1002'), (4, '1002'), (5, '1001'), (6, '1002')");
+            assertPlan(session, "select distinct a, b from metadata_optimize_partition_evolution",
+                    output(project(
+                            aggregation(ImmutableMap.of(),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            aggregation(ImmutableMap.of(),
+                                                    PARTIAL,
+                                                    project(values(ImmutableList.of("a", "b"),
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002")),
+                                                                    ImmutableList.of(new LongLiteral("4"), new StringLiteral("1002")),
+                                                                    ImmutableList.of(new LongLiteral("5"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("6"), new StringLiteral("1002")))))))))));
+
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(session, "select distinct a, b, c from metadata_optimize_partition_evolution",
+                        "values(1, '1001', NULL), (2, '1001', NULL), (3, '1002', NULL), (4, '1002', NULL), (5, '1001', 5), (6, '1002', 6)");
+            }
+            // New added partition column is not supported for metadata optimization
+            assertPlan(session, "select distinct a, b, c from metadata_optimize_partition_evolution",
+                    output(exchange(REMOTE_STREAMING, GATHER, project(
+                            aggregation(ImmutableMap.of(),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    aggregation(ImmutableMap.of(),
+                                                            PARTIAL,
+                                                            anyTree(strictTableScan("metadata_optimize_partition_evolution", identityMap("a", "b", "c")))))))))));
+
+            // Do not affect metadata optimization on original partition columns
+            assertQuery(session, "select min(a), max(a), min(b), max(b) from metadata_optimize_partition_evolution", "values(1, 6, '1001', '1002')");
+            assertPlan(session, "select min(a), max(a), min(b), max(b) from metadata_optimize_partition_evolution",
+                    output(strictProject(
+                            ImmutableMap.of(
+                                    "min(a)", expression("1"),
+                                    "max(a)", expression("6"),
+                                    "min(b)", expression("1001"),
+                                    "max(b)", expression("1002")),
+                            exchange(LOCAL, REPARTITION, values()))));
+
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(session, "select min(b), max(b), min(c), max(c) from metadata_optimize_partition_evolution", "values('1001', '1002', 5, 6)");
+            }
+            // New added partition column is not supported for metadata optimization
+            assertPlan(session, "select min(b), max(b), min(c), max(c) from metadata_optimize_partition_evolution",
+                    output(aggregation(
+                                    ImmutableMap.of(
+                                            "min(b)", functionCall("min", ImmutableList.of("min_b_partial")),
+                                            "max(b)", functionCall("max", ImmutableList.of("max_b_partial")),
+                                            "min(c)", functionCall("min", ImmutableList.of("min_c_partial")),
+                                            "max(c)", functionCall("max", ImmutableList.of("max_c_partial"))),
+                                    FINAL,
+                                    exchange(LOCAL, GATHER,
+                                            exchange(REMOTE_STREAMING, GATHER,
+                                                    aggregation(
+                                                            ImmutableMap.of(
+                                                                    "min_b_partial", functionCall("min", ImmutableList.of("b")),
+                                                                    "max_b_partial", functionCall("max", ImmutableList.of("b")),
+                                                                    "min_c_partial", functionCall("min", ImmutableList.of("c")),
+                                                                    "max_c_partial", functionCall("max", ImmutableList.of("c"))),
+                                                            PARTIAL,
+                                                            strictTableScan("metadata_optimize_partition_evolution", identityMap("b", "c"))))))));
+        }
+        finally {
+            queryRunner.execute("DROP TABLE IF EXISTS metadata_optimize_partition_evolution");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizationWithLimit(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session sessionWithOptimizeMetadataQueries = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("CREATE TABLE test_metadata_query_optimization_with_limit(a varchar, b int, c int) WITH (partitioning = ARRAY['b', 'c'])");
+            queryRunner.execute("INSERT INTO test_metadata_query_optimization_with_limit VALUES" +
+                    " ('1001', 1, 1), ('1002', 1, 1), ('1003', 1, 1)," +
+                    " ('1004', 1, 2), ('1005', 1, 2), ('1006', 1, 2)," +
+                    " ('1007', 2, 1), ('1008', 2, 1), ('1009', 2, 1)");
+
+            // Could do metadata optimization when `limit` existing above `aggregation`
+            assertQuery(sessionWithOptimizeMetadataQueries, "select distinct b, c from test_metadata_query_optimization_with_limit order by c desc limit 3",
+                    "values(1, 2), (1, 1), (2, 1)");
+            assertPlan(sessionWithOptimizeMetadataQueries, "select distinct b, c from test_metadata_query_optimization_with_limit order by c desc limit 3",
+                    anyTree(values(ImmutableList.of("b", "c"),
+                            ImmutableList.of(
+                                    ImmutableList.of(new LongLiteral("1"), new LongLiteral("2")),
+                                    ImmutableList.of(new LongLiteral("1"), new LongLiteral("1")),
+                                    ImmutableList.of(new LongLiteral("2"), new LongLiteral("1"))))));
+
+            // Should not do metadata optimization when `limit` existing below `aggregation`
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(sessionWithOptimizeMetadataQueries, "with tt as (select b, c from test_metadata_query_optimization_with_limit order by c desc limit 3) select b, min(c), max(c) from tt group by b",
+                        "values(1, 2, 2)");
+            }
+            assertPlan(sessionWithOptimizeMetadataQueries, "with tt as (select b, c from test_metadata_query_optimization_with_limit order by c desc limit 3) select b, min(c), max(c) from tt group by b",
+                    anyTree(strictTableScan("test_metadata_query_optimization_with_limit", identityMap("b", "c"))));
+        }
+        finally {
+            queryRunner.execute("DROP TABLE if exists test_metadata_query_optimization_with_limit");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizationWithMetadataEnforcedPredicate(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session sessionWithOptimizeMetadataQueries = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("CREATE TABLE test_with_metadata_enforced_filter(a varchar, b int, c int) WITH (partitioning = ARRAY['b', 'c'])");
+            queryRunner.execute("INSERT INTO test_with_metadata_enforced_filter VALUES" +
+                    " ('1001', 1, 1), ('1002', 1, 2), ('1003', 1, 3)," +
+                    " ('1007', 2, 1), ('1008', 2, 2), ('1009', 2, 3)");
+
+            // Could do metadata optimization when filtering by all metadata-enforced predicate
+            assertQuery(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_metadata_enforced_filter" +
+                            " where c > 1 group by b",
+                    "values(1, 2, 3), (2, 2, 3)");
+            assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_metadata_enforced_filter" +
+                            " where c > 1 group by b",
+                    anyTree(values(ImmutableList.of("b", "c"),
+                            ImmutableList.of(
+                                    ImmutableList.of(new LongLiteral("1"), new LongLiteral("2")),
+                                    ImmutableList.of(new LongLiteral("1"), new LongLiteral("3")),
+                                    ImmutableList.of(new LongLiteral("2"), new LongLiteral("2")),
+                                    ImmutableList.of(new LongLiteral("2"), new LongLiteral("3"))))));
+
+            // Another kind of metadata-enforced predicate which could not be push down, could do metadata optimization in such conditions as well
+            // Only support when do not enable `filter_push_down`
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_metadata_enforced_filter" +
+                                " where b + c > 2 and b + c < 5 group by b",
+                        "values(1, 2, 3), (2, 1, 2)");
+                assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_metadata_enforced_filter" +
+                                " where b + c > 2 and b + c < 5 group by b",
+                        anyTree(filter("b + c > 2 and b + c < 5", anyTree(values(ImmutableList.of("b", "c"),
+                                ImmutableList.of(
+                                        ImmutableList.of(new LongLiteral("1"), new LongLiteral("1")),
+                                        ImmutableList.of(new LongLiteral("1"), new LongLiteral("2")),
+                                        ImmutableList.of(new LongLiteral("1"), new LongLiteral("3")),
+                                        ImmutableList.of(new LongLiteral("2"), new LongLiteral("1")),
+                                        ImmutableList.of(new LongLiteral("2"), new LongLiteral("2")),
+                                        ImmutableList.of(new LongLiteral("2"), new LongLiteral("3"))))))));
+            }
+            else {
+                assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_metadata_enforced_filter" +
+                                " where b + c > 2 and b + c < 5 group by b",
+                        anyTree(strictTableScan("test_with_metadata_enforced_filter", identityMap("b", "c"))));
+            }
+
+            //TODO: add metadata enforcemented filters on non-identity partition column
+        }
+        finally {
+            queryRunner.execute("DROP TABLE if exists test_with_metadata_enforced_filter");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataOptimizationWithNonMetadataEnforcedPredicate(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session sessionWithOptimizeMetadataQueries = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("CREATE TABLE test_with_non_metadata_enforced_filter(a row(r1 varchar ,r2 int), b int, c int, d varchar) WITH (partitioning = ARRAY['b', 'c'])");
+            queryRunner.execute("INSERT INTO test_with_non_metadata_enforced_filter VALUES" +
+                    " (('1001', 1), 1, 1, 'd001'), (('1002', 2), 1, 1, 'd002'), (('1003', 3), 1, 1, 'd003')," +
+                    " (('1004', 4), 1, 2, 'd004'), (('1005', 5), 1, 2, 'd005'), (('1006', 6), 1, 2, 'd006')," +
+                    " (('1007', 7), 2, 1, 'd007'), (('1008', 8), 2, 1, 'd008'), (('1009', 9), 2, 1, 'd009')");
+
+            // Should not do metadata optimization when filtering by non-pushdown filter
+            if (!enabled) {
+                assertQuery(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_non_metadata_enforced_filter" +
+                                " where a.r1 >= '1003' and a.r1 <= '1007' group by b",
+                        "values(1, 1, 2), (2, 1, 1)");
+                assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_non_metadata_enforced_filter" +
+                                " where a.r1 >= '1003' and a.r1 <= '1007' group by b",
+                        anyTree(filter("a.r1 between '1003' and '1007'",
+                                strictTableScan("test_with_non_metadata_enforced_filter", identityMap("a", "b", "c")))));
+
+                assertQuery(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_non_metadata_enforced_filter" +
+                                " where d >= 'd003' and d <= 'd007' group by b",
+                        "values(1, 1, 2), (2, 1, 1)");
+                assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_non_metadata_enforced_filter" +
+                                " where d >= 'd003' and d <= 'd007' group by b",
+                        anyTree(filter("d between 'd003' and 'd007'",
+                                strictTableScan("test_with_non_metadata_enforced_filter", identityMap("d", "b", "c")))));
+            }
+            else {
+                assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_non_metadata_enforced_filter" +
+                                " where a.r1 >= '1003' and a.r1 <= '1007' group by b",
+                        anyTree(strictTableScan("test_with_non_metadata_enforced_filter", identityMap("b", "c"))));
+
+                assertPlan(sessionWithOptimizeMetadataQueries, "select b, min(c), max(c) from test_with_non_metadata_enforced_filter" +
+                                " where d >= 'd003' and d <= 'd007' group by b",
+                        anyTree(strictTableScan("test_with_non_metadata_enforced_filter", identityMap("b", "c"))));
+            }
+        }
+        finally {
+            queryRunner.execute("DROP TABLE if exists test_with_non_metadata_enforced_filter");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizerOnRowDelete(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session session = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("create table metadata_optimize_on_row_delete(v1 int, v2 varchar, a int, b varchar)" +
+                    " with(partitioning = ARRAY['a', 'b'])");
+            queryRunner.execute("insert into metadata_optimize_on_row_delete values" +
+                    " (1, '1001', 1, '1001')," +
+                    " (2, '1002', 2, '1001')," +
+                    " (3, '1003', 3, '1002')," +
+                    " (4, '1004', 4, '1002')");
+
+            assertUpdate("delete from metadata_optimize_on_row_delete where v1 >= 2", 3);
+
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(session, "select b, max(a), min(a) from metadata_optimize_on_row_delete group by b",
+                        "values('1001', 1, 1)");
+            }
+            // Skip metadata optimization when there existing delete files
+            assertPlan(session, "select b, max(a), min(a) from metadata_optimize_on_row_delete group by b",
+                    output(exchange(REMOTE_STREAMING, GATHER, project(
+                            aggregation(ImmutableMap.of("max", functionCall("max", ImmutableList.of("max_partial")), "min", functionCall("min", ImmutableList.of("min_partial"))),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    aggregation(ImmutableMap.of("max_partial", functionCall("max", ImmutableList.of("a")), "min_partial", functionCall("min", ImmutableList.of("a"))),
+                                                            PARTIAL,
+                                                            anyTree(strictTableScan("metadata_optimize_on_row_delete", identityMap("a", "b")))))))))));
+
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(session, "select distinct a, b from metadata_optimize_on_row_delete",
+                        "values(1, '1001')");
+            }
+            // Skip metadata optimization when there existing delete files
+            assertPlan(session, "select distinct a, b from metadata_optimize_on_row_delete",
+                    output(exchange(REMOTE_STREAMING, GATHER, project(
+                            aggregation(ImmutableMap.of(),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    aggregation(ImmutableMap.of(),
+                                                            PARTIAL,
+                                                            anyTree(strictTableScan("metadata_optimize_on_row_delete", identityMap("a", "b")))))))))));
+
+            // Only non-filterPushDown could run on Iceberg Java Connector
+            if (!Boolean.valueOf(enabled)) {
+                assertQuery(session, "select min(a), max(a), min(b), max(b) from metadata_optimize_on_row_delete", "values(1, 1, '1001', '1001')");
+            }
+            // Skip metadata optimization when there existing delete files
+            assertPlan(session, "select min(a), max(a), min(b), max(b) from metadata_optimize_on_row_delete",
+                    output(aggregation(
+                            ImmutableMap.of(
+                                    "min(a)", functionCall("min", ImmutableList.of("min_a_partial")),
+                                    "max(a)", functionCall("max", ImmutableList.of("max_a_partial")),
+                                    "min(b)", functionCall("min", ImmutableList.of("min_b_partial")),
+                                    "max(b)", functionCall("max", ImmutableList.of("max_b_partial"))),
+                            FINAL,
+                            exchange(LOCAL, GATHER,
+                                    exchange(REMOTE_STREAMING, GATHER,
+                                            aggregation(
+                                                    ImmutableMap.of(
+                                                            "min_a_partial", functionCall("min", ImmutableList.of("a")),
+                                                            "max_a_partial", functionCall("max", ImmutableList.of("a")),
+                                                            "min_b_partial", functionCall("min", ImmutableList.of("b")),
+                                                            "max_b_partial", functionCall("max", ImmutableList.of("b"))),
+                                                    PARTIAL,
+                                                    strictTableScan("metadata_optimize_on_row_delete", identityMap("a", "b"))))))));
+        }
+        finally {
+            queryRunner.execute("DROP TABLE IF EXISTS metadata_optimize_on_row_delete");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizerOnMetadataDelete(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session session = getSessionWithOptimizeMetadataQueries(enabled);
+        try {
+            queryRunner.execute("create table metadata_optimize_on_metadata_delete(v1 int, v2 varchar, a int, b varchar)" +
+                    " with(partitioning = ARRAY['a', 'b'])");
+            queryRunner.execute("insert into metadata_optimize_on_metadata_delete values" +
+                    " (0, '1000', 0, '1001')," +
+                    " (1, '1001', 1, '1001')," +
+                    " (2, '1002', 2, '1001')," +
+                    " (3, '1003', 3, '1002')," +
+                    " (4, '1004', 4, '1002')");
+
+            assertUpdate("delete from metadata_optimize_on_metadata_delete where a >= 2", 3);
+
+            // Do not affect metadata optimization on metadata delete
+            assertQuery(session, "select b, max(a), min(a) from metadata_optimize_on_metadata_delete group by b",
+                    "values('1001', 1, 0)");
+            assertPlan(session, "select b, max(a), min(a) from metadata_optimize_on_metadata_delete group by b",
+                    output(project(
+                            aggregation(ImmutableMap.of("max", functionCall("max", ImmutableList.of("max_partial")), "min", functionCall("min", ImmutableList.of("min_partial"))),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            aggregation(ImmutableMap.of("max_partial", functionCall("max", ImmutableList.of("a")), "min_partial", functionCall("min", ImmutableList.of("a"))),
+                                                    PARTIAL,
+                                                    project(values(ImmutableList.of("a", "b"),
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(new LongLiteral("0"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")))))))))));
+
+            // Do not affect metadata optimization on metadata delete
+            assertQuery(session, "select distinct a, b from metadata_optimize_on_metadata_delete",
+                    "values(1, '1001'), (0, '1001')");
+            assertPlan(session, "select distinct a, b from metadata_optimize_on_metadata_delete",
+                    output(project(
+                            aggregation(ImmutableMap.of(),
+                                    FINAL,
+                                    exchange(LOCAL, REPARTITION,
+                                            aggregation(ImmutableMap.of(),
+                                                    PARTIAL,
+                                                    project(values(ImmutableList.of("a", "b"),
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(new LongLiteral("0"), new StringLiteral("1001")),
+                                                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")))))))))));
+
+            // Do not affect metadata optimization on metadata delete
+            assertQuery(session, "select min(a), max(b) from metadata_optimize_on_metadata_delete", "values(0, '1001')");
+            assertPlan(session, "select min(a), max(b) from metadata_optimize_on_metadata_delete",
+                    output(strictProject(
+                            ImmutableMap.of("a", expression("0"), "b", expression("1001")),
+                            exchange(LOCAL, REPARTITION, values()))));
+        }
+        finally {
+            queryRunner.execute("DROP TABLE IF EXISTS metadata_optimize_on_metadata_delete");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testFilterByUnmatchedValue(boolean enabled)
+    {
+        Session session = getSessionWithOptimizeMetadataQueries(enabled);
         String tableName = "test_filter_by_unmatched_value";
         assertUpdate("CREATE TABLE " + tableName + " (a varchar, b integer, r row(c int, d varchar)) WITH(partitioning = ARRAY['a'])");
 
         // query with normal column filter on empty table
-        assertPlan(sessionWithFilterPushdown, "select a, r from " + tableName + " where b = 1001",
+        assertPlan(session, "select a, r from " + tableName + " where b = 1001",
                 output(values("a", "r")));
 
         // query with partition column filter on empty table
-        assertPlan(sessionWithFilterPushdown, "select b, r from " + tableName + " where a = 'var3'",
+        assertPlan(session, "select b, r from " + tableName + " where a = 'var3'",
                 output(values("b", "r")));
 
         assertUpdate("INSERT INTO " + tableName + " VALUES ('var1', 1, (1001, 't1')), ('var1', 3, (1003, 't3'))", 2);
@@ -136,11 +624,11 @@ public class TestIcebergLogicalPlanner
         assertUpdate("INSERT INTO " + tableName + " VALUES ('var1', 2, (1002, 't2')), ('var1', 9, (1009, 't9'))", 2);
 
         // query with unmatched normal column filter
-        assertPlan(sessionWithFilterPushdown, "select a, r from " + tableName + " where b = 1001",
+        assertPlan(session, "select a, r from " + tableName + " where b = 1001",
                 output(values("a", "r")));
 
         // query with unmatched partition column filter
-        assertPlan(sessionWithFilterPushdown, "select b, r from " + tableName + " where a = 'var3'",
+        assertPlan(session, "select b, r from " + tableName + " where a = 'var3'",
                 output(values("b", "r")));
 
         assertUpdate("DROP TABLE " + tableName);
@@ -153,6 +641,7 @@ public class TestIcebergLogicalPlanner
         Session sessionWithoutFilterPushdown = getQueryRunner().getDefaultSession();
 
         assertUpdate("CREATE TABLE test_filters_with_pushdown_disable(id int, name varchar, r row(a int, b varchar)) with (partitioning = ARRAY['id'])");
+        assertUpdate("INSERT INTO test_filters_with_pushdown_disable VALUES(10, 'adam', (10, 'adam')), (11, 'hd001', (11, 'hd001'))", 2);
 
         // Only identity partition column predicates, would be enforced totally by tableScan
         assertPlan(sessionWithoutFilterPushdown, "SELECT name, r FROM test_filters_with_pushdown_disable WHERE id = 10",
@@ -197,7 +686,7 @@ public class TestIcebergLogicalPlanner
                                 strictTableScan("test_filters_with_pushdown_disable", identityMap("name", "r")))))));
 
         // Predicates expression `in` for identity partition columns could be enforced by iceberg table as well
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM test_filters_with_pushdown_disable WHERE id in (1, 3, 5, 7, 9) and r.b = 'adam'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM test_filters_with_pushdown_disable WHERE id in (1, 3, 5, 7, 9, 10) and r.b = 'adam'",
                 output(exchange(project(
                         filter("r.b='adam'",
                                 strictTableScan("test_filters_with_pushdown_disable", identityMap("id", "name", "r")))))));
@@ -211,6 +700,7 @@ public class TestIcebergLogicalPlanner
 
         // Add a new identity partitioned column for iceberg table
         assertUpdate("ALTER TABLE test_filters_with_pushdown_disable add column newpart bigint with (partitioning = 'identity')");
+        assertUpdate("INSERT INTO test_filters_with_pushdown_disable VALUES(10, 'newman', (10, 'newman'), 1001)", 1);
 
         // Predicates with originally present identity partition column and newly added identity partition column
         // Only the predicate on originally present identity partition column could be enforced by tableScan
@@ -223,6 +713,7 @@ public class TestIcebergLogicalPlanner
         assertUpdate("DROP TABLE test_filters_with_pushdown_disable");
 
         assertUpdate("CREATE TABLE test_filters_with_pushdown_disable(id int, name varchar, r row(a int, b varchar)) with (partitioning = ARRAY['id', 'truncate(name, 2)'])");
+        assertUpdate("INSERT INTO test_filters_with_pushdown_disable VALUES (10, 'hd001', (10, 'newman'))", 1);
 
         // Predicates with non-identity partitioned column could not be enforced by tableScan
         assertPlan(sessionWithoutFilterPushdown, "SELECT id FROM test_filters_with_pushdown_disable WHERE name = 'hd001'",
@@ -533,6 +1024,7 @@ public class TestIcebergLogicalPlanner
                 "x row(a bigint, b varchar, c double, d row(d1 bigint, d2 double))," +
                 "y array(row(a bigint, b varchar, c double, d row(d1 bigint, d2 double)))) " +
                 "with (format = 'PARQUET')");
+        assertUpdate("INSERT INTO test_pushdown_nestedcolumn_parquet(id, x) VALUES(1, (11, 'abcd', 1.1, (1, 5.0)))", 1);
 
         assertParquetDereferencePushDown("SELECT x.a FROM test_pushdown_nestedcolumn_parquet",
                 "test_pushdown_nestedcolumn_parquet",
@@ -762,6 +1254,13 @@ public class TestIcebergLogicalPlanner
         return Session.builder(getQueryRunner().getDefaultSession())
                 .setSystemProperty(PUSHDOWN_DEREFERENCE_ENABLED, "false")
                 .setCatalogSessionProperty(ICEBERG_CATALOG, PARQUET_DEREFERENCE_PUSHDOWN_ENABLED, "false")
+                .build();
+    }
+
+    protected Session getSessionWithOptimizeMetadataQueries(boolean enabled)
+    {
+        return Session.builder(super.getSession())
+                .setCatalogSessionProperty(ICEBERG_CATALOG, PUSHDOWN_FILTER_ENABLED, String.valueOf(enabled))
                 .build();
     }
 
