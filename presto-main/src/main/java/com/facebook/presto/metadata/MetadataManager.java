@@ -64,6 +64,7 @@ import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.function.SqlFunction;
 import com.facebook.presto.spi.plan.PartitioningHandle;
+import com.facebook.presto.spi.procedure.IProcedureRegistry;
 import com.facebook.presto.spi.security.GrantInfo;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.spi.security.Privilege;
@@ -144,7 +145,7 @@ public class MetadataManager
     private static final Logger log = Logger.get(MetadataManager.class);
 
     private final FunctionAndTypeManager functionAndTypeManager;
-    private final ProcedureRegistry procedures;
+    private final IProcedureRegistry procedures;
     private final JsonCodec<ViewDefinition> viewCodec;
     private final BlockEncodingSerde blockEncodingSerde;
     private final SessionPropertyManager sessionPropertyManager;
@@ -177,7 +178,8 @@ public class MetadataManager
                 columnPropertyManager,
                 analyzePropertyManager,
                 transactionManager,
-                functionAndTypeManager);
+                functionAndTypeManager,
+                new ProcedureRegistry(functionAndTypeManager));
     }
 
     @Inject
@@ -190,7 +192,8 @@ public class MetadataManager
             ColumnPropertyManager columnPropertyManager,
             AnalyzePropertyManager analyzePropertyManager,
             TransactionManager transactionManager,
-            FunctionAndTypeManager functionAndTypeManager)
+            FunctionAndTypeManager functionAndTypeManager,
+            IProcedureRegistry procedureRegistry)
     {
         this.viewCodec = requireNonNull(viewCodec, "viewCodec is null");
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
@@ -201,7 +204,7 @@ public class MetadataManager
         this.analyzePropertyManager = requireNonNull(analyzePropertyManager, "analyzePropertyManager is null");
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.functionAndTypeManager = requireNonNull(functionAndTypeManager, "functionManager is null");
-        this.procedures = new ProcedureRegistry(functionAndTypeManager);
+        this.procedures = requireNonNull(procedureRegistry, "procedureRegistry is null");
 
         verifyComparableOrderableContract();
     }
@@ -1280,7 +1283,7 @@ public class MetadataManager
     }
 
     @Override
-    public ProcedureRegistry getProcedureRegistry()
+    public IProcedureRegistry getProcedureRegistry()
     {
         return procedures;
     }
