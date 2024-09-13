@@ -276,6 +276,7 @@ public final class IcebergQueryRunner
         logging.setLevel("org.apache.iceberg", WARN);
         logging.setLevel("com.facebook.airlift.bootstrap", WARN);
         logging.setLevel("org.apache.hadoop.io.compress", WARN);
+        logging.setLevel("org.apache.iceberg.hadoop", ERROR);
     }
 
     public static void main(String[] args)
