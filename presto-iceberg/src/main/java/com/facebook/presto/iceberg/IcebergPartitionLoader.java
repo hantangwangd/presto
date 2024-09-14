@@ -45,6 +45,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.common.Utils.checkArgument;
 import static com.facebook.presto.iceberg.ExpressionConverter.toIcebergExpression;
 import static com.facebook.presto.iceberg.IcebergUtil.getFileFormat;
 import static com.facebook.presto.iceberg.IcebergUtil.getIdentityPartitions;
@@ -63,6 +64,7 @@ public class IcebergPartitionLoader
     ConnectorTableHandle tableHandle;
     Constraint<ColumnHandle> constraint;
     List<IcebergColumnHandle> partitionColumns;
+    int maxPartitionThreshold = -1;
     final boolean isEmptyTable;
     final TableScan tableScan;
     public IcebergPartitionLoader(
@@ -101,6 +103,11 @@ public class IcebergPartitionLoader
             return ImmutableList.of();
         }
 
+        // When `maxPartitionThreshold == 0`, skip the optimization directly
+        if (maxPartitionThreshold == 0) {
+            return ImmutableList.of(new HivePartition(((IcebergTableHandle) tableHandle).getSchemaTableName()));
+        }
+
         Set<HivePartition> partitions = new HashSet<>();
         try (CloseableIterable<FileScanTask> fileScanTasks = tableScan.planFiles()) {
             for (FileScanTask fileScanTask : fileScanTasks) {
@@ -109,6 +116,10 @@ public class IcebergPartitionLoader
                     return ImmutableList.of(new HivePartition(((IcebergTableHandle) tableHandle).getSchemaTableName()));
                 }
 
+                // If threshold is set explicitly greater than 0, and partitions number exceeds the threshold, skip the optimization as well
+                if (maxPartitionThreshold > 0 && partitions.size() >= maxPartitionThreshold) {
+                    return ImmutableList.of(new HivePartition(((IcebergTableHandle) tableHandle).getSchemaTableName()));
+                }
                 StructLike partition = fileScanTask.file().partition();
                 PartitionSpec spec = fileScanTask.spec();
                 Map<PartitionField, Integer> fieldToIndex = getIdentityPartitions(spec);
@@ -188,6 +199,15 @@ public class IcebergPartitionLoader
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    @Override
+    public void setMaxPartitionThreshold(int maxPartitionThreshold)
+    {
+        checkArgument(maxPartitionThreshold > -1, "maxPartitionThreshold must greater than -1");
+        if (this.maxPartitionThreshold == -1) {
+            this.maxPartitionThreshold = maxPartitionThreshold;
         }
     }
 }

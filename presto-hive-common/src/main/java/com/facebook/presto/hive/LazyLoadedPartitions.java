@@ -13,6 +13,8 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.spi.LazyIterable;
+
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
@@ -34,6 +36,13 @@ public class LazyLoadedPartitions
         this.partitionLoader = requireNonNull(partitionLoader, "partitionLoader is null");
     }
 
+    public void setMaxPartitionThreshold(int maxPartitionThreshold)
+    {
+        if (this.partitionLoader != null) {
+            this.partitionLoader.setMaxPartitionThreshold(maxPartitionThreshold);
+        }
+    }
+
     public List<HivePartition> getFullyLoadedPartitions()
     {
         tryFullyLoad();
@@ -43,7 +52,7 @@ public class LazyLoadedPartitions
     /**
      * This method may return an iterable with lazy loading
      * */
-    public Iterable<HivePartition> getPartitionsIterable()
+    public LazyIterable<HivePartition> getPartitionsIterable()
     {
         return new LazyPartitionsIterable(this);
     }
@@ -76,5 +85,7 @@ public class LazyLoadedPartitions
         List<HivePartition> loadPartitions();
 
         boolean isEmpty();
+
+        void setMaxPartitionThreshold(int maxPartitionThreshold);
     }
 }

@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.spi.LazyIterable;
 import com.google.common.collect.AbstractIterator;
 
 import java.util.Iterator;
@@ -21,7 +22,7 @@ import java.util.List;
 import static java.util.Objects.requireNonNull;
 
 class LazyPartitionsIterable
-        implements Iterable<HivePartition>
+        implements LazyIterable<HivePartition>
 {
     private final LazyLoadedPartitions partitions;
 
@@ -34,6 +35,12 @@ class LazyPartitionsIterable
     public Iterator<HivePartition> iterator()
     {
         return new LazyIterator(partitions);
+    }
+
+    @Override
+    public void setMaxIterableCount(int maxIterableCount)
+    {
+        partitions.setMaxPartitionThreshold(maxIterableCount);
     }
 
     private static class LazyIterator
