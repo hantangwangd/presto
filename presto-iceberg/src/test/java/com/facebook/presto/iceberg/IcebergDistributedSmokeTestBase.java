@@ -1074,8 +1074,7 @@ public abstract class IcebergDistributedSmokeTestBase
             assertUpdate(format("INSERT INTO %s VALUES (TIME '10:12:34', 54321)", tableName), 1);
             assertQuery(
                     format("SELECT x, COUNT(*) FROM %s GROUP BY x ORDER BY x", tableName),
-                    "SELECT CAST('9:00:00' AS TIME), 1 UNION ALL SELECT CAST('10:12:34' AS TIME), 2"
-            );
+                    "SELECT CAST('9:00:00' AS TIME), 1 UNION ALL SELECT CAST('10:12:34' AS TIME), 2");
             assertQuery(format("SELECT y FROM %s WHERE x = time '10:12:34'", tableName), "values 12345, 54321");
         }
         finally {

@@ -15,6 +15,7 @@ package com.facebook.presto.orc.writer;
 
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.type.FixedWidthType;
+import com.facebook.presto.common.type.TimeType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.ColumnWriterOptions;
 import com.facebook.presto.orc.DwrfDataEncryptor;
@@ -38,6 +39,7 @@ import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DICTIONARY_DATA;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class LongDictionaryColumnWriter
         extends DictionaryColumnWriter
@@ -155,6 +157,9 @@ public class LongDictionaryColumnWriter
         for (int position = 0; position < block.getPositionCount(); position++) {
             if (!block.isNull(position)) {
                 long value = type.getLong(block, position);
+                if (type instanceof TimeType) {
+                    value = MILLISECONDS.toMicros(value);
+                }
                 statisticsBuilder.addValue(value);
                 rowGroupIndexes[rowGroupOffset++] = dictionary.putIfAbsent(value);
                 nonNullValueCount++;

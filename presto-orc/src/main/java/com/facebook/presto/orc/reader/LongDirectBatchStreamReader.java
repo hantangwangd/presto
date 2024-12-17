@@ -23,6 +23,7 @@ import com.facebook.presto.common.type.DateType;
 import com.facebook.presto.common.type.IntegerType;
 import com.facebook.presto.common.type.SmallintType;
 import com.facebook.presto.common.type.TimeType;
+import com.facebook.presto.common.type.TimeWithTimeZoneType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.OrcCorruptionException;
 import com.facebook.presto.orc.OrcLocalMemoryContext;
@@ -39,6 +40,8 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Optional;
 
+import static com.facebook.presto.common.type.DateTimeEncoding.packDateTimeWithZone;
+import static com.facebook.presto.common.type.TimeZoneKey.UTC_KEY;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DATA;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.PRESENT;
 import static com.facebook.presto.orc.reader.ReaderUtils.minNonNullValueSize;
@@ -52,6 +55,7 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MICROSECONDS;
 
 public class LongDirectBatchStreamReader
         implements BatchStreamReader
@@ -163,6 +167,15 @@ public class LongDirectBatchStreamReader
         if (type instanceof TimeType) {
             long[] values = new long[nextBatchSize];
             dataStream.next(values, nextBatchSize);
+            for (int i = 0; i < nextBatchSize; i++) {
+                long utcMillis = MICROSECONDS.toMillis(values[i]);
+                if (type instanceof TimeWithTimeZoneType) {
+                    values[i] = packDateTimeWithZone(utcMillis, UTC_KEY);
+                }
+                else {
+                    values[i] = utcMillis;
+                }
+            }
             return new LongArrayBlock(nextBatchSize, Optional.empty(), values);
         }
         if (type instanceof IntegerType || type instanceof DateType) {

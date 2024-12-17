@@ -45,6 +45,7 @@ import static com.facebook.presto.orc.stream.MissingInputStreamSource.getLongMis
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MICROSECONDS;
 
 public class LongDictionaryBatchStreamReader
         implements BatchStreamReader
@@ -189,6 +190,11 @@ public class LongDictionaryBatchStreamReader
         if (!dictionaryOpen && dictionarySize > 0) {
             DictionaryResult dictionaryResult = dictionaryProvider.getDictionary(streamDescriptor, dictionary, dictionarySize);
             dictionary = dictionaryResult.dictionaryBuffer();
+            if (type instanceof TimeType) {
+                for (int i = 0; i < dictionary.length; i++) {
+                    dictionary[i] = MICROSECONDS.toMillis(dictionary[i]);
+                }
+            }
             isDictionaryOwner = dictionaryResult.isBufferOwner();
             if (isDictionaryOwner) {
                 systemMemoryContext.setBytes(sizeOf(dictionary));

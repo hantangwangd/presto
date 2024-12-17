@@ -15,6 +15,7 @@ package com.facebook.presto.orc.writer;
 
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.type.FixedWidthType;
+import com.facebook.presto.common.type.TimeType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.ColumnWriterOptions;
 import com.facebook.presto.orc.DwrfDataEncryptor;
@@ -54,6 +55,7 @@ import static com.facebook.presto.orc.writer.ColumnWriterUtils.buildRowGroupInde
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class LongColumnWriter
         implements ColumnWriter
@@ -159,6 +161,9 @@ public class LongColumnWriter
         for (int position = 0; position < block.getPositionCount(); position++) {
             if (!block.isNull(position)) {
                 long value = type.getLong(block, position);
+                if (type instanceof TimeType) {
+                    value = MILLISECONDS.toMicros(value);
+                }
                 writeValue(value);
                 nonNullValueCount++;
             }
