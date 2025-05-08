@@ -478,6 +478,7 @@ class Query
                 ImmutableList.of(),
                 queryResults.getUpdateType(),
                 queryResults.getUpdateCount(),
+                queryResults.getStartedTransactionId(),
                 queryResults.isClearTransactionId());
     }
 
@@ -635,6 +636,7 @@ class Query
                 queryInfo.getWarnings(),
                 queryInfo.getUpdateType(),
                 updateCount,
+                startedTransactionId,
                 clearTransactionId);
 
         // cache the new result
