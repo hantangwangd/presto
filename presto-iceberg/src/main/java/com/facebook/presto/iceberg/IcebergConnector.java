@@ -15,6 +15,8 @@ package com.facebook.presto.iceberg;
 
 import com.facebook.airlift.bootstrap.LifeCycleManager;
 import com.facebook.presto.hive.HiveTransactionHandle;
+import com.facebook.presto.iceberg.transaction.IcebergTransactionManager;
+import com.facebook.presto.iceberg.transaction.IcebergTransactionMetadata;
 import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.classloader.ThreadContextClassLoader;
 import com.facebook.presto.spi.connector.Connector;
@@ -101,7 +103,7 @@ public class IcebergConnector
     @Override
     public boolean isSingleStatementWritesOnly()
     {
-        return true;
+        return false;
     }
 
     @Override
@@ -197,14 +199,22 @@ public class IcebergConnector
     @Override
     public ConnectorCommitHandle commit(ConnectorTransactionHandle transaction)
     {
-        transactionManager.remove(transaction);
+        IcebergTransactionMetadata icebergTransactionMetadata = transactionManager.get(transaction);
+        if (icebergTransactionMetadata != null) {
+            icebergTransactionMetadata.commit();
+            transactionManager.remove(transaction);
+        }
         return INSTANCE;
     }
 
     @Override
     public void rollback(ConnectorTransactionHandle transaction)
     {
-        transactionManager.remove(transaction);
+        IcebergTransactionMetadata icebergTransactionMetadata = transactionManager.get(transaction);
+        if (icebergTransactionMetadata != null) {
+            icebergTransactionMetadata.rollback();
+            transactionManager.remove(transaction);
+        }
     }
 
     @Override
